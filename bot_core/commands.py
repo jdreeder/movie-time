@@ -287,6 +287,8 @@ class MovieCommands:
             raise e
     
     async def next_event(self, interaction, movie_night_id: int = None):
+        # logger.info(f"Checking movie night state: events={len(movie_night.events)}, current index={movie_night.current_movie_index}, status={movie_night.status}")
+
         try:
             await interaction.response.defer()
             if not movie_night_id:
@@ -302,6 +304,9 @@ class MovieCommands:
                 await interaction.followup.send(f"No Movie Night found with ID: {movie_night_id}")
                 logger.info(f"No Movie Night found with ID: {movie_night_id}")
                 return
+            
+            logger.info(f"Checking movie night state: events={len(movie_night.events)}, current index={movie_night.current_movie_index}, status={movie_night.status}")
+
 
             announcement_channel = interaction.guild.get_channel(self.announcement_channel_id)
             if not announcement_channel:
@@ -309,7 +314,17 @@ class MovieCommands:
                 logger.info("Announcement channel is not configured.")
                 return
 
-            if movie_night.current_movie_index >= len(movie_night.events) - 1:
+            logger.info(f"Movie Night Info events: {movie_night.events}, current movie index: {movie_night.current_movie_index}")
+            logger.info(f"Movie events (list format): {[str(event) for event in movie_night.events]}")
+
+            if movie_night.status == 2:
+                await announcement_channel.send("Movie Night has ended.")
+                await interaction.followup.send("Movie Night has ended.")
+                logger.info("Movie Night has ended.")
+                return  # Stop execution before fetching another event
+            
+            if len(movie_night.events) > 1 and movie_night.current_movie_index >= len(movie_night.events) - 1:
+                logger.info("Ending multi movie night")
                 await self.movie_night_service.end_last_event(movie_night)
                 await announcement_channel.send("Movie Night has ended.")
                 await interaction.followup.send("Movie Night has ended.")
@@ -319,17 +334,44 @@ class MovieCommands:
             if movie_night.status == 0:
                 await self.movie_night_service.start_first_event(movie_night)
                 current_movie_event = self.movie_night_manager.get_current_movie_event(movie_night_id)
+                logger.info(f"Fetched current_movie_event: {current_movie_event}")
                 movie_name = current_movie_event.movie.name if current_movie_event.movie else "Unknown Movie"
                 message = f"Starting the first movie: {movie_name}"
             else:
+                logger.info(f"movie_night.events type: {type(movie_night.events)}, len: {len(movie_night.events)}")
+                logger.info(f"movie_night.current_movie_index type: {type(movie_night.current_movie_index)}, value: {movie_night.current_movie_index}")
+                logger.info(f"movie_night.status type: {type(movie_night.status)}, value: {movie_night.status}")
+
                 await self.movie_night_service.transition_to_next_event(movie_night)
                 current_movie_event = self.movie_night_manager.get_current_movie_event(movie_night_id)
+                if not current_movie_event:
+                    logger.info("No current movie event found. Movie night has ended.")
+                    await announcement_channel.send("Movie Night has ended.")
+                    await interaction.followup.send("Movie Night has ended.")
+                    return
                 movie_name = current_movie_event.movie.name if current_movie_event.movie else "Unknown Movie"
                 message = f"Starting the next movie: {movie_name}"
 
-            now_playing_embed = await post_now_playing(current_movie_event, self.ping_role_id)
-            await announcement_channel.send(message, embed=now_playing_embed)
-            await interaction.followup.send(f"Next event started: {message}")
+            # Re-check movie night status to avoid posting "Now Playing" again
+            movie_night = self.movie_night_manager.get_movie_night(movie_night_id)
+            if movie_night.status == 2:
+                logger.info("Movie Night ended after transition.")
+                await announcement_channel.send("Movie Night has ended.")
+                await interaction.followup.send("Movie Night has ended.")
+                return  # Prevents posting "Now Playing"
+
+            # Ensure the now playing message happens only when active movie event 
+            if current_movie_event:
+                logger.info(f"Posting Now Playing for {current_movie_event}")
+                now_playing_embed = await post_now_playing(current_movie_event, self.ping_role_id)
+                await announcement_channel.send(message, embed=now_playing_embed)
+                await interaction.followup.send(f"Next event started: {message}")
+            else:
+                logger.info("Ending single-event movie night")
+                await announcement_channel.send("Movie Night has ended.")
+                await interaction.followup.send("Movie Night has ended.")
+                logger.info("Movie Night has ended.")
+                return
 
         except Exception as e:
             logger.error(f"Error in next_event: {e}")

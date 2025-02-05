@@ -128,9 +128,19 @@ class MovieNightService:
             last_event = movie_night.events[-1]
             await self.discord_events.end_event(self.guild_id, last_event.discord_event_id)
             movie_night.status = 2  # Update status to Finished
+            movie_night.current_movie_index = len(movie_night.events) # Moves index past last event
             self.movie_event_manager.db_session.commit()
 
+            logger.info("Movie night has ended successfully - end_last_event")
+
     async def transition_to_next_event(self, movie_night):
+        logger.info(f"movie_night.events type: {type(movie_night.events)}, value: {movie_night.events}")
+        if len(movie_night.events) == 1:
+            # Special case for single vents nights, instead of Looping
+            logger.debug("Only one movie night exists. Ending movie night.")
+            await self.end_last_event(movie_night)
+            return 
+        
         if movie_night.current_movie_index < len(movie_night.events) - 1:
             # End current event
             current_event = movie_night.events[movie_night.current_movie_index]
