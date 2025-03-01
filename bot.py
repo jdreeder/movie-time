@@ -1,4 +1,4 @@
-import discord, logging, os
+import discord, logging, os, asyncio
 from logging.handlers import RotatingFileHandler
 from discord import app_commands
 from database.database import SessionLocal
@@ -8,6 +8,7 @@ from managers.movie_manager import MovieManager
 from managers.movie_event_manager import MovieEventManager
 from services.movie_night_service import MovieNightService
 from services.movie_scraper import MovieScraper
+from services.reminder_service import ReminderService
 from bot_core.commands import MovieCommands, ConfigCommands, HelpCommands
 from utils.config_manager import ConfigManager
 from utils.logging_config import setup_logging
@@ -37,10 +38,13 @@ movie_night_service = MovieNightService(movie_night_manager, MovieManager(db_ses
 movie_commands = MovieCommands(movie_night_manager, movie_night_service, movie_event_manager, token, ping_role, announcement_channel)
 config_commands = ConfigCommands(config_manager)
 intents = discord.Intents.default()
+intents.message_content = True
+intents.reactions = True
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
-
+# Initialize reminder service
+reminder_service = ReminderService(client, movie_night_manager, config_manager)
 
 @tree.command(name='create_movie_night', description="Create a new movie night", guild=discord.Object(id=guild_id))
 async def create_movie_night_command(interaction, title: str, description: str, start_time: str = None, start_date: str = None):
@@ -98,6 +102,13 @@ async def cancel_movie_night_command(interaction, movie_night_id: int):
     except ValueError as e:
         await interaction.response.send_message(str(e), ephemeral=True)
         
+@tree.command(name='view_all_movie_nights', description="View a list of all movie nights", guild=discord.Object(id=guild_id))
+async def view_all_movie_nights_command(interaction):
+    try:
+        await movie_commands.view_all_movie_nights(interaction)
+    except ValueError as e:
+        await interaction.response.send_message(str(e), ephemeral=True)
+        
 @tree.command(name='update', description="Update the movie night post", guild=discord.Object(id=guild_id))
 async def update_command(interaction: discord.Interaction, movie_night_id: int):
     try:
@@ -109,8 +120,8 @@ async def update_command(interaction: discord.Interaction, movie_night_id: int):
         await interaction.response.send_message("An error occurred while trying to update the movie night.", ephemeral=True)
 
 @tree.command(name='config', description="Configs the movie bot.", guild=discord.Object(id=guild_id))
-async def config_command(interaction, stream_channel: discord.VoiceChannel = None, announcement_channel: discord.TextChannel = None, ping_role: discord.Role = None, timezone: TimeZones = None):
-    await config_commands.config(interaction, stream_channel, announcement_channel, ping_role, timezone)
+async def config_command(interaction, stream_channel: discord.VoiceChannel = None, announcement_channel: discord.TextChannel = None, ping_role: discord.Role = None, timezone: TimeZones = None, reminder_minutes: int = None):
+    await config_commands.config(interaction, stream_channel, announcement_channel, ping_role, timezone, reminder_minutes)
 
 @tree.command(name='next', description="Start the next movie", guild=discord.Object(id=guild_id))
 async def next_event_command(interaction, movie_night_id: int = None):
@@ -127,6 +138,8 @@ async def help_command(interaction):
 @client.event
 async def on_ready():
     await tree.sync(guild=discord.Object(id=guild_id))
+    # Start the reminder service
+    asyncio.create_task(reminder_service.start_reminder_service())
     print("Bot is ready")
 
 client.run(token)

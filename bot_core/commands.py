@@ -230,28 +230,48 @@ class MovieCommands:
     async def view_movie_night(self, interaction, movie_night_id: int = None):
         try:
             await interaction.response.defer()
+            
+            # Case 1: No movie_night_id provided
             if movie_night_id is None:
                 movie_night_id = self.movie_night_manager.get_most_recent_movie_night_id()
                 if movie_night_id is None:
-                    await interaction.followup.send("No movie nights found.")
+                    logger.info("No movie nights exist in the database")
+                    await interaction.followup.send("No movie nights have been created yet. Use `/create_movie_night` to create one.")
                     return
 
+            # Case 2: Specific movie_night_id provided but not found
             movie_night_details = self.movie_night_manager.get_movie_night_details(movie_night_id)
-
-            if not movie_night_details:
-                await interaction.followup.send("Movie Night not found.")
+            
+            # Handle case where get_movie_night_details returns an error message string
+            if isinstance(movie_night_details, str):
+                logger.warning(f"Attempted to view non-existent movie night with ID: {movie_night_id}")
+                await interaction.followup.send(f"Movie Night #{movie_night_id} does not exist. Use `/create_movie_night` to create a new one.")
                 return
 
+            # Case 3: Movie night exists but has no events
+            if not movie_night_details['events']:
+                response_text = f"Movie Night #{movie_night_id}: {movie_night_details['title']}\n"
+                response_text += f"Description: {movie_night_details['description']}\n"
+                response_text += "No movies have been added to this movie night yet. Use `/add_movies` to add some movies!"
+                await interaction.followup.send(response_text)
+                logger.info(f"Viewed empty movie night ID {movie_night_id}")
+                return
+
+            # Case 4: Success case - Movie night exists with events
             response_text = f"Movie Night #{movie_night_id}: {movie_night_details['title']}\n"
             response_text += f"Description: {movie_night_details['description']}\n"
             for event in movie_night_details['events']:
                 server_timezone_str = self.server_timezone.value
                 start_time = utc_to_local_timestamp(event['start_time'], server_timezone_str)
                 response_text += f"  - Event ID: {event['event_id']}\n - Name: {event['movie_name']}\n - Start Time: <t:{start_time}:F>\n\n"
+            
             await interaction.followup.send(response_text)
-            logger.info(f"Viewed movie night ID {movie_night_id}")
+            logger.info(f"Successfully viewed movie night ID {movie_night_id} with {len(movie_night_details['events'])} events")
+
         except Exception as e:
-            logger.error(f"Error in view_movie_night: {e}")
+            error_msg = f"An unexpected error occurred while viewing the movie night: {str(e)}"
+            logger.error(f"Error in view_movie_night: {error_msg}", exc_info=True)
+            await interaction.followup.send("Sorry, something went wrong while trying to view the movie night. Please try again later.")
             raise e
 
     async def edit_movie_night(self, interaction, movie_night_id: int = None, title: str = None, description: str = None):
@@ -287,8 +307,6 @@ class MovieCommands:
             raise e
     
     async def next_event(self, interaction, movie_night_id: int = None):
-        # logger.info(f"Checking movie night state: events={len(movie_night.events)}, current index={movie_night.current_movie_index}, status={movie_night.status}")
-
         try:
             await interaction.response.defer()
             if not movie_night_id:
@@ -304,9 +322,6 @@ class MovieCommands:
                 await interaction.followup.send(f"No Movie Night found with ID: {movie_night_id}")
                 logger.info(f"No Movie Night found with ID: {movie_night_id}")
                 return
-            
-            logger.info(f"Checking movie night state: events={len(movie_night.events)}, current index={movie_night.current_movie_index}, status={movie_night.status}")
-
 
             announcement_channel = interaction.guild.get_channel(self.announcement_channel_id)
             if not announcement_channel:
@@ -314,17 +329,17 @@ class MovieCommands:
                 logger.info("Announcement channel is not configured.")
                 return
 
-            logger.info(f"Movie Night Info events: {movie_night.events}, current movie index: {movie_night.current_movie_index}")
-            logger.info(f"Movie events (list format): {[str(event) for event in movie_night.events]}")
+            if movie_night.current_movie_index >= len(movie_night.events):
+                # Re-fetch the event list to check if new movies were added
+                new_events = self.movie_night_manager.get_movie_night(movie_night.id).events
+                if len(new_events) > len(movie_night.events):
+                    movie_night.events = new_events  # Refresh event list
+                    movie_night.current_movie_index = len(movie_night.events) - 1  # Move to the new last movie
+                    self.movie_event_manager.db_session.commit()
+                    await self.movie_night_service.transition_to_next_event(movie_night)
+                    return
 
-            if movie_night.status == 2:
-                await announcement_channel.send("Movie Night has ended.")
-                await interaction.followup.send("Movie Night has ended.")
-                logger.info("Movie Night has ended.")
-                return  # Stop execution before fetching another event
-            
-            if len(movie_night.events) > 1 and movie_night.current_movie_index >= len(movie_night.events) - 1:
-                logger.info("Ending multi movie night")
+                # Otherwise, actually end the movie night
                 await self.movie_night_service.end_last_event(movie_night)
                 await announcement_channel.send("Movie Night has ended.")
                 await interaction.followup.send("Movie Night has ended.")
@@ -334,40 +349,26 @@ class MovieCommands:
             if movie_night.status == 0:
                 await self.movie_night_service.start_first_event(movie_night)
                 current_movie_event = self.movie_night_manager.get_current_movie_event(movie_night_id)
-                logger.info(f"Fetched current_movie_event: {current_movie_event}")
                 movie_name = current_movie_event.movie.name if current_movie_event.movie else "Unknown Movie"
                 message = f"Starting the first movie: {movie_name}"
             else:
-                logger.info(f"movie_night.events type: {type(movie_night.events)}, len: {len(movie_night.events)}")
-                logger.info(f"movie_night.current_movie_index type: {type(movie_night.current_movie_index)}, value: {movie_night.current_movie_index}")
-                logger.info(f"movie_night.status type: {type(movie_night.status)}, value: {movie_night.status}")
-
                 await self.movie_night_service.transition_to_next_event(movie_night)
                 current_movie_event = self.movie_night_manager.get_current_movie_event(movie_night_id)
-                if not current_movie_event:
-                    logger.info("No current movie event found. Movie night has ended.")
+                if not current_movie_event or movie_night.current_movie_index >= len(movie_night.events):
+                    logger.info("No active movie event remaining. Movie night has ended.")
                     await announcement_channel.send("Movie Night has ended.")
                     await interaction.followup.send("Movie Night has ended.")
                     return
+                
                 movie_name = current_movie_event.movie.name if current_movie_event.movie else "Unknown Movie"
                 message = f"Starting the next movie: {movie_name}"
 
-            # Re-check movie night status to avoid posting "Now Playing" again
-            movie_night = self.movie_night_manager.get_movie_night(movie_night_id)
-            if movie_night.status == 2:
-                logger.info("Movie Night ended after transition.")
-                await announcement_channel.send("Movie Night has ended.")
-                await interaction.followup.send("Movie Night has ended.")
-                return  # Prevents posting "Now Playing"
-
             # Ensure the now playing message happens only when active movie event 
             if current_movie_event:
-                logger.info(f"Posting Now Playing for {current_movie_event}")
                 now_playing_embed = await post_now_playing(current_movie_event, self.ping_role_id)
                 await announcement_channel.send(message, embed=now_playing_embed)
                 await interaction.followup.send(f"Next event started: {message}")
             else:
-                logger.info("Ending single-event movie night")
                 await announcement_channel.send("Movie Night has ended.")
                 await interaction.followup.send("Movie Night has ended.")
                 logger.info("Movie Night has ended.")
@@ -395,6 +396,65 @@ class MovieCommands:
         
         await interaction.response.send_message(f"Movie Night {movie_night_id} and its events have been canceled and deleted.", ephemeral=True)   
                  
+    async def view_all_movie_nights(self, interaction):
+        try:
+            await interaction.response.defer()
+            
+            # Get all movie nights from the database
+            movie_nights = self.movie_night_manager.list_all_movie_nights()
+            
+            if not movie_nights:
+                logger.info("No movie nights exist in the database")
+                await interaction.followup.send("No movie nights have been created yet. Use `/create_movie_night` to create one.")
+                return
+            
+            # Create a formatted list of movie nights
+            response_text = "**All Movie Nights:**\n\n"
+            
+            # Define status labels
+            status_labels = {
+                0: "Not Started",
+                1: "In Progress",
+                2: "Finished"
+            }
+            
+            # Sort movie nights by ID (newest first)
+            movie_nights.sort(key=lambda x: x.id, reverse=True)
+            
+            for movie_night in movie_nights:
+                status = status_labels.get(movie_night.status, "Unknown")
+                movie_count = len(movie_night.events) if movie_night.events else 0
+                
+                response_text += f"**ID: {movie_night.id}** - {movie_night.title}\n"
+                response_text += f"Status: {status} | Movies: {movie_count}\n"
+                
+                # Add a timestamp if available
+                if movie_night.start_time:
+                    server_timezone_str = self.server_timezone.value
+                    start_time = utc_to_local_timestamp(movie_night.start_time, server_timezone_str)
+                    response_text += f"Created: <t:{start_time}:F>\n"
+                
+                response_text += "\n"
+            
+            # If the response is too long, split it into chunks
+            if len(response_text) > 2000:
+                chunks = [response_text[i:i+1900] for i in range(0, len(response_text), 1900)]
+                for i, chunk in enumerate(chunks):
+                    if i == 0:
+                        await interaction.followup.send(chunk)
+                    else:
+                        await interaction.followup.send(f"(Continued {i+1}/{len(chunks)})\n{chunk}")
+            else:
+                await interaction.followup.send(response_text)
+            
+            logger.info(f"Successfully listed {len(movie_nights)} movie nights")
+            
+        except Exception as e:
+            error_msg = f"An unexpected error occurred while listing movie nights: {str(e)}"
+            logger.error(f"Error in view_all_movie_nights: {error_msg}", exc_info=True)
+            await interaction.followup.send("Sorry, something went wrong while trying to list movie nights. Please try again later.")
+            raise e
+
 class ConfigCommands:
     def __init__(self, config_manager):
         self.config_manager = config_manager
