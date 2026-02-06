@@ -1,6 +1,9 @@
 import aiohttp
 from PIL import Image
 import io
+import logging
+
+logger = logging.getLogger(__name__)
 
 async def download_image(url):
     async with aiohttp.ClientSession() as session:
@@ -9,7 +12,7 @@ async def download_image(url):
                 image_data = await response.read()
                 return image_data
             else:
-                print(f"Failed to download image from {url}. HTTP Status Code: {response.status}")
+                logger.warning(f"Failed to download image from {url}. HTTP Status Code: {response.status}")
                 return None     
 
 def convert_image_format(image_data, format="JPEG"):
