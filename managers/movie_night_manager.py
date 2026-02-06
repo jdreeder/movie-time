@@ -1,5 +1,8 @@
 from database.db_models import MovieNight
 from sqlalchemy.orm import Session
+import logging
+
+logger = logging.getLogger(__name__)
 
 class MovieNightManager:
     def __init__(self, db_session: Session):
@@ -54,7 +57,7 @@ class MovieNightManager:
             else:
                 raise ValueError(f"No Movie Night found with ID: {movie_night_id}")
         except Exception as e:
-            print(f"An error occurred: {e}")
+            logger.error(f"An error occurred: {e}")
             return None
     
     def get_movie_night_details(self, movie_night_id):
