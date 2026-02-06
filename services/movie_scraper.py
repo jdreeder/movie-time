@@ -1,4 +1,4 @@
-import requests
+import cloudscraper  # Replace requests
 from bs4 import BeautifulSoup
 from tmdbv3api import TMDb, Movie, Search
 import re
@@ -15,27 +15,22 @@ class MovieScraper:
         self.tmdb.api_key = self.api_key
         self.movie = Movie()
         
-        # Define headers to mimic a real browser
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Cache-Control': 'max-age=0',
-        }
+        # Create cloudscraper instance instead of using requests
+        self.scraper = cloudscraper.create_scraper(
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'desktop': True
+            }
+        )
+        logger.info("[INIT] Created cloudscraper instance to bypass Cloudflare")
     
     def normalize_letterboxd_url(self, url: str) -> str:
         logger.debug(f"[NORMALIZE] Starting normalization for URL: {url}")
         if "boxd.it" in url:
             try:
                 logger.debug(f"[NORMALIZE] Detected shortened URL, resolving...")
-                response = requests.get(url, allow_redirects=True, headers=self.headers, timeout=10)
+                response = self.scraper.get(url, allow_redirects=True, timeout=10)
                 logger.debug(f"[NORMALIZE] Resolution status code: {response.status_code}")
                 if response.status_code == 200:
                     logger.debug(f"[NORMALIZE] ✅ Successfully resolved to: {response.url}")
@@ -53,15 +48,17 @@ class MovieScraper:
     def extract_movie_details_from_letterboxd(self, url):
         logger.info(f"[EXTRACT] Starting extraction from URL: {url}")
         try:
-            logger.debug(f"[EXTRACT] Making HTTP request with custom headers...")
-            logger.debug(f"[EXTRACT] User-Agent: {self.headers['User-Agent']}")
+            logger.debug(f"[EXTRACT] Making HTTP request via cloudscraper...")
             
-            response = requests.get(url, headers=self.headers, timeout=10)
+            # Use cloudscraper instead of requests
+            response = self.scraper.get(url, timeout=30)
             logger.debug(f"[EXTRACT] Response status code: {response.status_code}")
-            logger.debug(f"[EXTRACT] Response headers: {dict(response.headers)}")
             
-            response.raise_for_status()
-            logger.info(f"[EXTRACT] ✅ Successfully fetched page content")
+            if response.status_code != 200:
+                logger.error(f"[EXTRACT] ❌ Non-200 status code: {response.status_code}")
+                return None, None
+                
+            logger.info(f"[EXTRACT] ✅ Successfully fetched page content (bypassed Cloudflare)")
             
             soup = BeautifulSoup(response.text, 'html.parser')
             logger.debug(f"[EXTRACT] Parsed HTML with BeautifulSoup")
@@ -88,18 +85,15 @@ class MovieScraper:
             content_wrap = soup.find('div', class_='content-wrap')
             if not content_wrap:
                 logger.warning("[EXTRACT] ❌ Failed to find 'content-wrap' div")
-                # Log available classes to help debug
                 all_divs = soup.find_all('div', limit=10)
                 logger.debug(f"[EXTRACT] Sample div classes found: {[div.get('class') for div in all_divs if div.get('class')]}")
                 return None, None
 
             logger.debug(f"[EXTRACT] Found content-wrap div")
 
-            # Updated selector for the title element
             title_element = content_wrap.find('h1', class_='headline-1 primaryname')
             if title_element:
                 logger.debug(f"[EXTRACT] Found title element")
-                # The text is inside a span element
                 span_element = title_element.find('span', class_='name')
                 title = span_element.get_text(strip=True) if span_element else title_element.get_text(strip=True)
                 logger.debug(f"[EXTRACT] Extracted title: '{title}'")
@@ -123,16 +117,8 @@ class MovieScraper:
             logger.info(f"[EXTRACT] ✅ Method 2 SUCCESS - Title: '{title}', Year: {year}")
             return title, year
             
-        except requests.exceptions.HTTPError as e:
-            logger.error(f"[EXTRACT] ❌ HTTP Error: {e}")
-            logger.error(f"[EXTRACT] Status code: {e.response.status_code}")
-            logger.error(f"[EXTRACT] Response text (first 500 chars): {e.response.text[:500]}")
-            return None, None
-        except requests.exceptions.Timeout:
-            logger.error(f"[EXTRACT] ❌ Request timeout after 10 seconds")
-            return None, None
-        except requests.exceptions.RequestException as e:
-            logger.error(f"[EXTRACT] ❌ Request exception: {e}")
+        except cloudscraper.exceptions.CloudflareChallengeError as e:
+            logger.error(f"[EXTRACT] ❌ Cloudflare Challenge Failed: {e}")
             return None, None
         except Exception as e:
             logger.error(f"[EXTRACT] ❌ Unexpected error: {e}")
