@@ -10,12 +10,24 @@ from services.movie_night_service import MovieNightService
 from services.movie_scraper import MovieScraper
 from bot_core.commands import MovieCommands, ConfigCommands, HelpCommands
 from utils.config_manager import ConfigManager
-from utils.logging_config import setup_logging
+from utils.logging_config import setup_logging, log_with_context
 from bot_core.helpers import TimeZones
+import time
 
 setup_logging()
 logger = logging.getLogger(__name__)
 logger.info("Application is starting up...")
+
+# Track connection state
+connection_stats = {
+    'start_time': time.time(),
+    'connect_count': 0,
+    'disconnect_count': 0,
+    'resume_count': 0,
+    'last_connect': None,
+    'last_disconnect': None,
+    'last_resume': None
+}
 
 config_manager = ConfigManager()
 secrets = SecretManager().load_secrets()
@@ -37,10 +49,75 @@ movie_night_service = MovieNightService(movie_night_manager, MovieManager(db_ses
 movie_commands = MovieCommands(movie_night_manager, movie_night_service, movie_event_manager, token, ping_role, announcement_channel)
 config_commands = ConfigCommands(config_manager)
 intents = discord.Intents.default()
+intents.message_content = True
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
+# Discord connection event handlers
+@client.event
+async def on_connect():
+    """Called when the bot connects to Discord."""
+    connection_stats['connect_count'] += 1
+    connection_stats['last_connect'] = time.time()
+    
+    uptime = time.time() - connection_stats['start_time']
+    log_with_context(
+        logger, 
+        logging.INFO, 
+        "Discord connection established", 
+        connect_count=connection_stats['connect_count'],
+        uptime_seconds=uptime,
+        session_id=getattr(client, '_session_id', 'unknown')
+    )
 
+@client.event
+async def on_disconnect():
+    """Called when the bot disconnects from Discord."""
+    connection_stats['disconnect_count'] += 1
+    connection_stats['last_disconnect'] = time.time()
+    
+    uptime = time.time() - connection_stats['start_time']
+    log_with_context(
+        logger, 
+        logging.WARNING, 
+        "Discord connection lost", 
+        disconnect_count=connection_stats['disconnect_count'],
+        uptime_seconds=uptime,
+        session_id=getattr(client, '_session_id', 'unknown')
+    )
+
+@client.event
+async def on_resumed():
+    """Called when the bot resumes a connection to Discord."""
+    connection_stats['resume_count'] += 1
+    connection_stats['last_resume'] = time.time()
+    
+    uptime = time.time() - connection_stats['start_time']
+    log_with_context(
+        logger, 
+        logging.INFO, 
+        "Discord connection resumed", 
+        resume_count=connection_stats['resume_count'],
+        uptime_seconds=uptime,
+        session_id=getattr(client, '_session_id', 'unknown')
+    )
+
+@client.event
+async def on_ready():
+    """Called when the bot is ready and synced."""
+    await tree.sync(guild=discord.Object(id=guild_id))
+    
+    uptime = time.time() - connection_stats['start_time']
+    log_with_context(
+        logger, 
+        logging.INFO, 
+        "Bot is ready and synced", 
+        user_id=client.user.id,
+        guild_count=len(client.guilds),
+        uptime_seconds=uptime,
+        connection_stats=connection_stats
+    )
+    print("Bot is ready")
 
 @tree.command(name='create_movie_night', description="Create a new movie night", guild=discord.Object(id=guild_id))
 async def create_movie_night_command(interaction, title: str, description: str, start_time: str = None, start_date: str = None):
@@ -98,6 +175,13 @@ async def cancel_movie_night_command(interaction, movie_night_id: int):
     except ValueError as e:
         await interaction.response.send_message(str(e), ephemeral=True)
         
+@tree.command(name='view_all_movie_nights', description="View a list of all movie nights", guild=discord.Object(id=guild_id))
+async def view_all_movie_nights_command(interaction):
+    try:
+        await movie_commands.view_all_movie_nights(interaction)
+    except ValueError as e:
+        await interaction.response.send_message(str(e), ephemeral=True)
+        
 @tree.command(name='update', description="Update the movie night post", guild=discord.Object(id=guild_id))
 async def update_command(interaction: discord.Interaction, movie_night_id: int):
     try:
@@ -123,10 +207,5 @@ async def next_event_command(interaction, movie_night_id: int = None):
 async def help_command(interaction):
     help_commands = HelpCommands()
     await help_commands.help_command(interaction)
-
-@client.event
-async def on_ready():
-    await tree.sync(guild=discord.Object(id=guild_id))
-    print("Bot is ready")
 
 client.run(token)
