@@ -44,25 +44,41 @@ class MovieScraper:
         self.min_delay = min_delay
         self.max_delay = max_delay
         
-        # Create cloudscraper instance with browser configuration
+        # Create cloudscraper with more aggressive browser emulation
         self.scraper = cloudscraper.create_scraper(
             browser={
                 'browser': 'chrome',
                 'platform': 'windows',
                 'desktop': True
             },
-            delay=10  # Initial delay for challenge solving
+            delay=10,
+            # Add these parameters
+            interpreter='nodejs',  # Use Node.js for better challenge solving
+            captcha={
+                'provider': 'return_response'  # Return response even if captcha detected
+            }
         )
-        
-        # Add session persistence (mimics real browser behavior)
+
         self.scraper.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
             'Accept-Language': 'en-US,en;q=0.9',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Encoding': 'gzip, deflate',
+            'DNT': '1',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
+            'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
         })
         
         logger.info(f"[INIT] Created cloudscraper instance with {min_delay}-{max_delay}s delays")
+
     
     @rate_limit(min_delay=2.0, max_delay=5.0)
     def normalize_letterboxd_url(self, url: str) -> str:
@@ -117,19 +133,54 @@ class MovieScraper:
                     return self.extract_movie_details_from_letterboxd(url, retry_count + 1, max_retries)
                 else:
                     logger.error(f"[EXTRACT] ❌ Max retries exceeded for rate limiting")
-                    return None, None
+                    return None, None, None
             
             if response.status_code != 200:
                 logger.error(f"[EXTRACT] ❌ Non-200 status code: {response.status_code}")
-                return None, None
+                return None, None, None
                 
             logger.info(f"[EXTRACT] ✅ Successfully fetched page content (bypassed Cloudflare)")
+
+            # DEBUG: Save the HTML to a file to inspect it
+            # with open('/tmp/letterboxd_debug.html', 'w', encoding='utf-8') as f:
+            #     f.write(response.text)
+            
+            # logger.debug(f"[EXTRACT] Saved HTML to /tmp/letterboxd_debug.html for inspection")
+            logger.debug(f"[EXTRACT] HTML length: {len(response.text)} characters")
+            # logger.debug(f"[EXTRACT] First 500 chars: {response.text[:500]}")
             
             soup = BeautifulSoup(response.text, 'html.parser')
             logger.debug(f"[EXTRACT] Parsed HTML with BeautifulSoup")
 
-            # First try to get the information from metadata tags (most reliable)
-            # First try to get the information from metadata tags (most reliable)
+            # Extract TMDB ID from the page
+            tmdb_id = None
+            logger.debug(f"[EXTRACT] Attempting to extract TMDB ID...")
+            
+            # Method 1: Look for TMDB link with data-track-action attribute
+            tmdb_link = soup.find('a', {'data-track-action': 'TMDb'})
+            if tmdb_link and tmdb_link.get('href'):
+                tmdb_url = tmdb_link['href']
+                logger.debug(f"[EXTRACT] Found TMDB link: {tmdb_url}")
+                match = re.search(r'/movie/(\d+)', tmdb_url)
+                if match:
+                    tmdb_id = match.group(1)
+                    logger.info(f"[EXTRACT] ✅ Extracted TMDB ID: {tmdb_id}")
+            
+            # Method 2: Alternative - look for any link to themoviedb.org
+            if not tmdb_id:
+                all_links = soup.find_all('a', href=re.compile(r'themoviedb\.org/movie/\d+'))
+                if all_links:
+                    tmdb_url = all_links[0]['href']
+                    logger.debug(f"[EXTRACT] Found TMDB link (method 2): {tmdb_url}")
+                    match = re.search(r'/movie/(\d+)', tmdb_url)
+                    if match:
+                        tmdb_id = match.group(1)
+                        logger.info(f"[EXTRACT] ✅ Extracted TMDB ID (method 2): {tmdb_id}")
+            
+            if not tmdb_id:
+                logger.warning("[EXTRACT] ⚠️ Could not find TMDB ID on page")
+
+            # Extract title and year
             logger.debug(f"[EXTRACT] Attempting Method 1: Meta tag extraction...")
             meta_title = soup.find('meta', property='og:title')
             if meta_title and meta_title.get('content'):
@@ -140,7 +191,7 @@ class MovieScraper:
                     title = match.group(1).strip()
                     year = match.group(2)
                     logger.info(f"[EXTRACT] ✅ Method 1 SUCCESS - Title: '{title}', Year: {year}")
-                    return title, year
+                    return title, year, tmdb_id
                 else:
                     logger.debug(f"[EXTRACT] Meta title found but regex didn't match expected pattern")
             else:
@@ -153,7 +204,7 @@ class MovieScraper:
                 logger.warning("[EXTRACT] ❌ Failed to find 'content-wrap' div")
                 all_divs = soup.find_all('div', limit=10)
                 logger.debug(f"[EXTRACT] Sample div classes found: {[div.get('class') for div in all_divs if div.get('class')]}")
-                return None, None
+                return None, None, None
 
             logger.debug(f"[EXTRACT] Found content-wrap div")
 
@@ -178,10 +229,10 @@ class MovieScraper:
 
             if not title or not year:
                 logger.error(f"[EXTRACT] ❌ Method 2 FAILED - Title: {title}, Year: {year}")
-                return None, None
+                return None, None, None
 
             logger.info(f"[EXTRACT] ✅ Method 2 SUCCESS - Title: '{title}', Year: {year}")
-            return title, year
+            return title, year, tmdb_id
             
         except cloudscraper.exceptions.CloudflareChallengeError as e:
             logger.error(f"[EXTRACT] ❌ Cloudflare Challenge Failed: {e}")
@@ -190,19 +241,32 @@ class MovieScraper:
                 logger.warning(f"[EXTRACT] Retrying after {backoff_time}s backoff...")
                 time.sleep(backoff_time)
                 return self.extract_movie_details_from_letterboxd(url, retry_count + 1, max_retries)
-            return None, None
+            return None, None, None
         except Exception as e:
             logger.error(f"[EXTRACT] ❌ Unexpected error: {e}")
             logger.exception("Full traceback:")
-            return None, None
+            return None, None, None
 
-    def get_movie_details_from_tmdb_by_title_and_year(self, title, year):
-        logger.debug(f"[TMDB] Fetching movie details for title: '{title}', year: {year}")
+
+    def get_movie_details_from_tmdb(self, tmdb_id=None, title=None, year=None):
+        """
+        Fetch movie details from TMDB using either direct ID or title/year search.
+        Prioritizes direct ID if available.
+        """
+        logger.debug(f"[TMDB] Fetching movie details - ID: {tmdb_id}, Title: '{title}', Year: {year}")
+        
         try:
-            movie_id = self.search_tmdb_for_movie_id(title, year)
-            if movie_id is None:
-                logger.warning(f"[TMDB] ❌ No TMDB ID found for movie: '{title}', {year}")
-                return None
+            # Use direct TMDB ID if available
+            if tmdb_id:
+                logger.info(f"[TMDB] Using direct TMDB ID: {tmdb_id}")
+                movie_id = tmdb_id
+            else:
+                # Fall back to search if no ID provided
+                logger.debug(f"[TMDB] No direct ID available, searching by title and year")
+                movie_id = self.search_tmdb_for_movie_id(title, year)
+                if movie_id is None:
+                    logger.warning(f"[TMDB] ❌ No TMDB ID found for movie: '{title}', {year}")
+                    return None
 
             logger.debug(f"[TMDB] Fetching details for movie ID: {movie_id}")
             details = self.movie.details(movie_id)
@@ -218,7 +282,7 @@ class MovieScraper:
             overview = details.get('overview', 'No overview available')
             release_date = details.get('release_date', 'Unknown')
 
-            logger.info(f"[TMDB] ✅ Successfully extracted TMDB details for '{title}'")
+            logger.info(f"[TMDB] ✅ Successfully extracted TMDB details for '{details['title']}'")
             return {
                 'name': details['title'],
                 'year': details['release_date'].split('-')[0],
@@ -230,11 +294,13 @@ class MovieScraper:
                 'revenue': revenue,
                 'overview': overview,
                 'release_date': release_date,
+                'tmdb_id': movie_id,
             }
         except Exception as e:
             logger.error(f"[TMDB] ❌ Error fetching details: {e}")
             logger.exception("Full traceback:")
             return None
+
 
     def get_movie_details_from_url(self, url):
         logger.info(f"[MAIN] Getting movie details from URL: {url}")
@@ -244,13 +310,14 @@ class MovieScraper:
             raise ValueError(f"Invalid or inaccessible URL: {url}")
             
         if "letterboxd.com" in normalized_url:
-            title, year = self.extract_movie_details_from_letterboxd(normalized_url)
+            title, year, tmdb_id = self.extract_movie_details_from_letterboxd(normalized_url)
             if not title or not year:
                 error_msg = f"Failed to extract movie details from Letterboxd page: {normalized_url}"
                 logger.error(f"[MAIN] ❌ {error_msg}")
                 raise ValueError(error_msg)
-                
-            details = self.get_movie_details_from_tmdb_by_title_and_year(title, year)
+            
+            # Use direct TMDB ID if available, otherwise fall back to search
+            details = self.get_movie_details_from_tmdb(tmdb_id=tmdb_id, title=title, year=year)
             if not details:
                 error_msg = f"Failed to find movie in TMDB: '{title}' ({year})"
                 logger.error(f"[MAIN] ❌ {error_msg}")
@@ -263,6 +330,7 @@ class MovieScraper:
             error_msg = f"URL is not a Letterboxd movie page: {url}"
             logger.error(f"[MAIN] ❌ {error_msg}")
             raise ValueError(error_msg)
+
 
     def search_tmdb_for_movie_id(self, title, year):
         logger.debug(f"[TMDB-SEARCH] Searching for movie ID - Title: '{title}', Year: {year}")
