@@ -4,7 +4,9 @@ from tmdbv3api import TMDb, Movie, Search
 import re
 import logging
 
+
 logger = logging.getLogger(__name__)
+
 
 class MovieScraper:
     def __init__(self, api_key):
@@ -12,58 +14,141 @@ class MovieScraper:
         self.tmdb = TMDb()
         self.tmdb.api_key = self.api_key
         self.movie = Movie()
+        
+        # Define headers to mimic a real browser
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'max-age=0',
+        }
     
     def normalize_letterboxd_url(self, url: str) -> str:
-        logger.debug(f"Normalizing URL: {url}")
+        logger.debug(f"[NORMALIZE] Starting normalization for URL: {url}")
         if "boxd.it" in url:
             try:
-                response = requests.get(url, allow_redirects=True)
+                logger.debug(f"[NORMALIZE] Detected shortened URL, resolving...")
+                response = requests.get(url, allow_redirects=True, headers=self.headers, timeout=10)
+                logger.debug(f"[NORMALIZE] Resolution status code: {response.status_code}")
                 if response.status_code == 200:
-                    logger.debug(f"Resolved URL to: {response.url}")
+                    logger.debug(f"[NORMALIZE] ✅ Successfully resolved to: {response.url}")
                     return response.url 
                 else:
-                    logger.warning(f"Failed to resolve URL: {url}. Status code: {response.status_code}")
+                    logger.warning(f"[NORMALIZE] ❌ Failed to resolve URL: {url}. Status code: {response.status_code}")
                     return None
             except Exception as e:
-                logger.error(f"An error occurred while resolving URL: {e}")
+                logger.error(f"[NORMALIZE] ❌ Exception while resolving URL: {e}")
                 return None
         else:
+            logger.debug(f"[NORMALIZE] URL is already in full format")
             return url
         
     def extract_movie_details_from_letterboxd(self, url):
+        logger.info(f"[EXTRACT] Starting extraction from URL: {url}")
         try:
-            response = requests.get(url)
+            logger.debug(f"[EXTRACT] Making HTTP request with custom headers...")
+            logger.debug(f"[EXTRACT] User-Agent: {self.headers['User-Agent']}")
+            
+            response = requests.get(url, headers=self.headers, timeout=10)
+            logger.debug(f"[EXTRACT] Response status code: {response.status_code}")
+            logger.debug(f"[EXTRACT] Response headers: {dict(response.headers)}")
+            
             response.raise_for_status()
+            logger.info(f"[EXTRACT] ✅ Successfully fetched page content")
+            
             soup = BeautifulSoup(response.text, 'html.parser')
+            logger.debug(f"[EXTRACT] Parsed HTML with BeautifulSoup")
 
+            # First try to get the information from metadata tags (most reliable)
+            logger.debug(f"[EXTRACT] Attempting Method 1: Meta tag extraction...")
+            meta_title = soup.find('meta', property='og:title')
+            if meta_title and meta_title.get('content'):
+                meta_content = meta_title['content']
+                logger.debug(f"[EXTRACT] Found meta title: '{meta_content}'")
+                match = re.search(r'(.*?)\s*\((\d{4})\)', meta_content)
+                if match:
+                    title = match.group(1).strip()
+                    year = match.group(2)
+                    logger.info(f"[EXTRACT] ✅ Method 1 SUCCESS - Title: '{title}', Year: {year}")
+                    return title, year
+                else:
+                    logger.debug(f"[EXTRACT] Meta title found but regex didn't match expected pattern")
+            else:
+                logger.debug(f"[EXTRACT] No og:title meta tag found")
+
+            # Fallback to HTML structure if meta tags don't work
+            logger.debug(f"[EXTRACT] Attempting Method 2: HTML structure parsing...")
             content_wrap = soup.find('div', class_='content-wrap')
             if not content_wrap:
-                logger.warning("Failed to find 'content-wrap' div")
+                logger.warning("[EXTRACT] ❌ Failed to find 'content-wrap' div")
+                # Log available classes to help debug
+                all_divs = soup.find_all('div', limit=10)
+                logger.debug(f"[EXTRACT] Sample div classes found: {[div.get('class') for div in all_divs if div.get('class')]}")
                 return None, None
 
-            title_element = content_wrap.find('h1', class_='headline-1 filmtitle')
-            year_element = content_wrap.find('div', class_='releaseyear')
+            logger.debug(f"[EXTRACT] Found content-wrap div")
 
-            title = title_element.get_text(strip=True) if title_element else None
-            year = year_element.find('a').get_text(strip=True) if year_element and year_element.find('a') else None
+            # Updated selector for the title element
+            title_element = content_wrap.find('h1', class_='headline-1 primaryname')
+            if title_element:
+                logger.debug(f"[EXTRACT] Found title element")
+                # The text is inside a span element
+                span_element = title_element.find('span', class_='name')
+                title = span_element.get_text(strip=True) if span_element else title_element.get_text(strip=True)
+                logger.debug(f"[EXTRACT] Extracted title: '{title}'")
+            else:
+                logger.warning(f"[EXTRACT] No title element found")
+                title = None
+
+            year_element = content_wrap.find('div', class_='releaseyear')
+            if year_element:
+                year_link = year_element.find('a')
+                year = year_link.get_text(strip=True) if year_link else None
+                logger.debug(f"[EXTRACT] Extracted year: {year}")
+            else:
+                logger.warning(f"[EXTRACT] No year element found")
+                year = None
 
             if not title or not year:
-                logger.warning(f"Failed to extract title or year from URL: {url}")
+                logger.error(f"[EXTRACT] ❌ Method 2 FAILED - Title: {title}, Year: {year}")
+                return None, None
 
-            logger.debug(f"Extracted title: {title}, year: {year}")
+            logger.info(f"[EXTRACT] ✅ Method 2 SUCCESS - Title: '{title}', Year: {year}")
             return title, year
+            
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"[EXTRACT] ❌ HTTP Error: {e}")
+            logger.error(f"[EXTRACT] Status code: {e.response.status_code}")
+            logger.error(f"[EXTRACT] Response text (first 500 chars): {e.response.text[:500]}")
+            return None, None
+        except requests.exceptions.Timeout:
+            logger.error(f"[EXTRACT] ❌ Request timeout after 10 seconds")
+            return None, None
+        except requests.exceptions.RequestException as e:
+            logger.error(f"[EXTRACT] ❌ Request exception: {e}")
+            return None, None
         except Exception as e:
-            logger.error(f"An error occurred while extracting details from Letterboxd: {e}")
+            logger.error(f"[EXTRACT] ❌ Unexpected error: {e}")
+            logger.exception("Full traceback:")
             return None, None
 
+
     def get_movie_details_from_tmdb_by_title_and_year(self, title, year):
-        logger.debug(f"Fetching movie details from TMDB for title: {title}, year: {year}")
+        logger.debug(f"[TMDB] Fetching movie details for title: '{title}', year: {year}")
         try:
             movie_id = self.search_tmdb_for_movie_id(title, year)
             if movie_id is None:
-                logger.warning(f"No TMDB ID found for movie: {title}, {year}")
+                logger.warning(f"[TMDB] ❌ No TMDB ID found for movie: '{title}', {year}")
                 return None
 
+            logger.debug(f"[TMDB] Fetching details for movie ID: {movie_id}")
             details = self.movie.details(movie_id)
             credits = self.movie.credits(movie_id)
             director = [crew_member for crew_member in credits['crew'] if crew_member['job'] == 'Director']
@@ -77,7 +162,7 @@ class MovieScraper:
             overview = details.get('overview', 'No overview available')
             release_date = details.get('release_date', 'Unknown')
 
-            logger.debug(f"Extracted TMDB details for {title}")
+            logger.info(f"[TMDB] ✅ Successfully extracted TMDB details for '{title}'")
             return {
                 'name': details['title'],
                 'year': details['release_date'].split('-')[0],
@@ -91,30 +176,48 @@ class MovieScraper:
                 'release_date': release_date,
             }
         except Exception as e:
-            logger.error(f"An error occurred while fetching details from TMDB: {e}")
+            logger.error(f"[TMDB] ❌ Error fetching details: {e}")
+            logger.exception("Full traceback:")
             return None
+
 
     def get_movie_details_from_url(self, url):
-        logger.debug(f"Getting movie details from URL: {url}")
+        logger.info(f"[MAIN] Getting movie details from URL: {url}")
         normalized_url = self.normalize_letterboxd_url(url)
-        if normalized_url and "letterboxd.com" in normalized_url:
+        if not normalized_url:
+            logger.error(f"[MAIN] ❌ Failed to normalize URL: {url}")
+            raise ValueError(f"Invalid or inaccessible URL: {url}")
+            
+        if "letterboxd.com" in normalized_url:
             title, year = self.extract_movie_details_from_letterboxd(normalized_url)
-            if title and year:
-                details = self.get_movie_details_from_tmdb_by_title_and_year(title, year)
-                if details:
-                    details['url'] = normalized_url 
-                return details
+            if not title or not year:
+                error_msg = f"Failed to extract movie details from Letterboxd page: {normalized_url}"
+                logger.error(f"[MAIN] ❌ {error_msg}")
+                raise ValueError(error_msg)
+                
+            details = self.get_movie_details_from_tmdb_by_title_and_year(title, year)
+            if not details:
+                error_msg = f"Failed to find movie in TMDB: '{title}' ({year})"
+                logger.error(f"[MAIN] ❌ {error_msg}")
+                raise ValueError(error_msg)
+                
+            details['url'] = normalized_url
+            logger.info(f"[MAIN] ✅ Successfully retrieved all details for '{title}'")
+            return details
         else:
-            return None
+            error_msg = f"URL is not a Letterboxd movie page: {url}"
+            logger.error(f"[MAIN] ❌ {error_msg}")
+            raise ValueError(error_msg)
+
 
     def search_tmdb_for_movie_id(self, title, year):
-        logger.debug(f"Searching TMDB for movie ID with title: {title}, year: {year}")
+        logger.debug(f"[TMDB-SEARCH] Searching for movie ID - Title: '{title}', Year: {year}")
         search = Search()
         results = search.movies({'query': title, 'year': year})
         
         if results:
-            logger.debug(f"Found TMDB ID for {title}: {results[0]['id']}")
+            logger.info(f"[TMDB-SEARCH] ✅ Found TMDB ID for '{title}': {results[0]['id']}")
             return results[0]['id']
         else:
-            logger.warning(f"No results found in TMDB for title: {title}, year: {year}")
+            logger.warning(f"[TMDB-SEARCH] ❌ No results found for '{title}' ({year})")
             return None
